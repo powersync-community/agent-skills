@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/powersync-ja/agent-skills/compare/v1.4.1...v1.5.0) (2026-09-08)
+
+
+### Features
+
+* add service.yaml config options from docs full reference (powersync-docs [#578](https://github.com/powersync-ja/agent-skills/issues/578)) ([#98](https://github.com/powersync-ja/agent-skills/issues/98)) ([8f85817](https://github.com/powersync-ja/agent-skills/commit/8f85817d922830e60c22c864ad2cf401be825597))
+
 ## [1.4.1](https://github.com/powersync-ja/agent-skills/compare/v1.4.0...v1.4.1) (2026-09-05)
 
 
