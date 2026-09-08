@@ -2,7 +2,7 @@
 name: powersync-service
 description: PowerSync Service configuration — self-hosting, Docker, Kubernetes, Helm, source database setup, bucket storage, authentication, and PowerSync Cloud
 metadata:
-  tags: service, self-hosted, docker, postgresql, mongodb, documentdb, cosmosdb, mysql, mssql, convex, authentication, jwt, replication, configuration, private-endpoints, privatelink, vpc, aws, kubernetes, helm, eks
+  tags: service, self-hosted, docker, postgresql, mongodb, documentdb, cosmosdb, mysql, mssql, convex, authentication, jwt, replication, configuration, private-endpoints, privatelink, vpc, aws, kubernetes, helm, eks, prometheus_port, heartbeat_interval_seconds, snapshot_socket_timeout, healthcheck, migrations, disable_auto_migration, object_storage, s3, storage_version
 ---
 
 # PowerSync Service
@@ -92,7 +92,7 @@ Generate the base64 value: `base64 -i ./powersync/sync-config.yaml` (macOS) or `
 
 | Resource                        | Description                                                                                                             |
 |----------------------------------|-------------------------------------------------------------------------------------------------------------------------|
-| [Configuration File Structure](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances.md#configuration-file-structure) | Outline of all possible configuration options                                   |
+| [Self-Hosted Configuration Reference](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances) | Full reference for all service.yaml configuration options |
 | [Config Schema](https://unpkg.com/@powersync/service-schema@1.20.0/json-schema/powersync-config.json)                | JSON schema reference for PowerSync Service config                               |
 | [self-host-demo](https://github.com/powersync-ja/self-host-demo) repo                                            | Example configurations for local development                                     |
 
@@ -157,6 +157,95 @@ client_auth:
 ```
 
 Choose the example that matches your auth provider. See `references/supabase-auth.md` for Supabase details or `references/custom-backend.md` for custom JWT setup.
+
+### Additional service.yaml Options
+
+> Load this section when configuring monitoring, operational controls, or newer connection options.
+
+#### Telemetry and Prometheus Metrics
+
+`telemetry` is a top-level key in `service.yaml`, not nested under `client_auth`. To expose Prometheus metrics for scraping, set `telemetry.prometheus_port`:
+
+```yaml
+telemetry:
+  disable_telemetry_sharing: false
+  prometheus_port: 9090
+```
+
+#### Health Check Probes
+
+If `healthcheck.probes` is not set, the Service uses legacy default behavior. When `probes` is configured, each mechanism requires explicit opt-in:
+
+```yaml
+healthcheck:
+  probes:
+    use_filesystem: true  # Expose health status via filesystem files
+    use_http: true        # Expose health status via HTTP endpoints
+```
+
+#### Storage Migrations
+
+By default, the Service applies storage schema migrations on startup. To disable automatic migrations (for example, when running migrations as a separate step):
+
+```yaml
+migrations:
+  disable_auto_migration: true
+```
+
+#### Connection Heartbeats
+
+All source connection types support `heartbeat_interval_seconds` (default 60, range 5-60, available since Service v1.24.0). The Service writes periodic heartbeats to the source to keep replication active when the change stream has not advanced recently. Tune this when you see stale replication:
+
+```yaml
+replication:
+  connections:
+    - type: postgresql    # Also applies to mongodb, mysql, mssql
+      uri: !env PS_DATA_SOURCE_URI
+      heartbeat_interval_seconds: 30
+```
+
+#### Postgres: Snapshot Socket Timeout
+
+If you see `Socket timed out` errors in Service logs during the initial Postgres snapshot, the storage database is stalling the snapshot beyond the idle socket timeout. Increase `snapshot_socket_timeout` (default 30 seconds, available since Service v1.26.0):
+
+```yaml
+replication:
+  connections:
+    - type: postgresql
+      uri: !env PS_DATA_SOURCE_URI
+      snapshot_socket_timeout: 120
+```
+
+#### MongoDB Object Storage (Experimental)
+
+To offload large bucket data chunks to S3-compatible object storage instead of MongoDB, configure `storage.object_storage` (available since Service v1.24.0; requires `storage_version: 3` in your sync config):
+
+```yaml
+storage:
+  type: mongodb
+  uri: !env PS_STORAGE_URI
+  object_storage:
+    type: s3
+    bucket: my-powersync-bucket
+    region: us-east-1
+    access_key_id: !env PS_S3_KEY
+    secret_access_key: !env PS_S3_SECRET
+```
+
+#### Storage Version Default
+
+To control which storage version the Service uses for new sync config deployments (available since Service v1.26.0), set `storage.default_storage_version`. Even numbers are stable; odd numbers are experimental:
+
+```yaml
+storage:
+  default_storage_version: 2  # 2 (stable, default); 3 (experimental)
+```
+
+Set this before a Service downgrade, or to delay a storage format upgrade. See [Storage Version](https://docs.powersync.com/sync/advanced/compatibility#storage-version) for details.
+
+#### Deprecated: `sync_rules` Key
+
+The top-level `sync_rules` key is a deprecated alias for `sync_config`. Use `sync_config` in new configurations.
 
 ### Replication connections
 
@@ -233,12 +322,12 @@ This is required by PowerSync and can be configured in two different ways. This 
 
 | Storage Database | Configuration Reference                                                                                   |
 |-----------------|--------------------------------------------------------------------------------------------------------------|
-| MongoDB         | [MongoDB Storage](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances.md#mongodb-storage) |
-| Postgres        | [Postgres Storage](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances.md#postgres-storage) |
+| MongoDB         | [MongoDB Storage](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances#mongodb-storage) |
+| Postgres        | [Postgres Storage](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances#postgres-storage) |
 
 ### Client Authentication
 
-There are various options when configuring client authentication on a PowerSync Service instance, see [Client Authentication](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances.md#client-authentication) for more information on the options. The options include: JWKS URI, inline JWKs, Supabase Auth, Shared Secrets. Prefer asymmetric keys (RS256, EdDSA, ECDSA) over shared secrets (HS256).
+There are various options when configuring client authentication on a PowerSync Service instance, see [Client Authentication](https://docs.powersync.com/configuration/powersync-service/self-hosted-instances#client_auth) for more information on the options. The options include: JWKS URI, inline JWKs, Supabase Auth, Shared Secrets. Prefer asymmetric keys (RS256, EdDSA, ECDSA) over shared secrets (HS256).
 
 **Important:** There is no `dev: true` auth type in the `client_auth` config schema. It does not exist. For development tokens on self-hosted, configure a real signing key first, then use `powersync generate token`. On PowerSync Cloud, users need to enable development tokens via the dashboard in the Client Auth section of the instance.
 
@@ -315,7 +404,7 @@ Both PowerSync Cloud and Self-hosted require the same base source database setup
 If the operator's source database version is below the minimum, advise them to upgrade before proceeding.
 
 | Database | Minimum Version |
-|----------|-----------------|
+|----------|----------------|
 | PostgreSQL | 11+ |
 | MongoDB | 6.0+ |
 | MySQL | 5.7+ |
