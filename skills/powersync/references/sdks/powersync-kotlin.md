@@ -2,7 +2,7 @@
 name: powersync-kotlin
 description: PowerSync Kotlin SDK — schema, queries, sync lifecycle, and backend connectors
 metadata:
-  tags: kotlin, android, ios, sqlite, offline-first
+  tags: kotlin, android, ios, sqlite, offline-first, checkpoint-requests
 ---
 
 # PowerSync Kotlin SDK
@@ -17,11 +17,12 @@ metadata:
 - [Compose Integration](#compose-integration)
 - [Sync Status](#sync-status)
 - [Sync Streams](#sync-streams)
+- [Checkpoint Requests (Alpha)](#checkpoint-requests-alpha)
 - [Background Sync (Android)](#background-sync-android)
 
 Best practices for building apps with the PowerSync Kotlin SDK.
 
-Supported targets: Android, JVM, iOS, macOS, watchOS, tvOS.
+Supported targets: Android, JVM, iOS, macOS, watchOS, tvOS. Web (JS and WebAssembly) targets have experimental support from v1.14.1. Web is not production-ready; use from a single tab only (multi-tab sync coordination is not functional in this version).
 
 ## Installation
 
@@ -46,6 +47,8 @@ commonMain.dependencies {
 ```
 
 From v1.12.0+ the PowerSync SQLite core extension is statically linked into `com.powersync:core` for all Apple targets (iOS, macOS, tvOS, watchOS), matching Android and JVM. **No CocoaPod or Swift Package dependency on `powersync-sqlite-core` is needed.** Upgrading from an older version? Remove any `pod("powersync-sqlite-core")` entry and any `powersync-sqlite-core-swift` SPM dependency.
+
+For web targets (JS and WebAssembly), use `WebConnectionFactory` to open a PowerSync database. Web support is experimental (added in v1.14.1) and not production-ready. Use from a single tab only; multi-tab sync coordination is not functional.
 
 ## Quick Setup
 
@@ -420,6 +423,91 @@ stream.unsubscribeAll()
 
 Same stream name with different parameters creates separate subscriptions. Subscribing while offline is supported — subscriptions are tracked locally and sent on next connect.
 
+## Checkpoint Requests (Alpha)
+
+Checkpoint requests let you confirm that the local database has caught up to a specific server state. Use this when you need to know that server changes are available locally: after a local write to wait for the result to sync back, in a pull-to-refresh flow, or when a user opens a link that refers to data that may not have synced yet.
+
+Requires PowerSync Service v1.24.0+. .NET and Rust SDKs do not yet support checkpoint requests.
+
+To opt in, pass `CheckpointMode.Requests()` in `SyncOptions` to `connect()`:
+
+```kotlin
+database.connect(
+    connector,
+    options = SyncOptions(
+        checkpointMode = CheckpointMode.Requests(),
+    )
+)
+```
+
+Without this option, calling `requestCheckpoint()` throws an error. Kotlin uses `Long` for checkpoint IDs (unlike the JavaScript and Dart SDKs, which use strings).
+
+### Waiting for the Latest Server Data
+
+```kotlin
+val checkpoint = database.requestCheckpoint()
+withTimeout(30.seconds) {
+    checkpoint.waitForSync()
+}
+// Local queries now reflect server state from when requestCheckpoint() was called.
+```
+
+`requestCheckpoint()` requires the database to be connected or connecting. If offline, the call suspends until the Service is reachable. Cancelling `waitForSync` or reaching a timeout does not remove the checkpoint. It only limits how long you wait for the checkpoint to apply locally.
+
+### Error Handling
+
+```kotlin
+try {
+    val checkpoint = database.requestCheckpoint()
+    withTimeout(30.seconds) {
+        checkpoint.waitForSync()
+    }
+} catch (e: TimeoutCancellationException) {
+    showRefreshMessage("The refresh timed out. Try again.")
+} catch (e: CheckpointRequestException.Disconnected) {
+    showRefreshMessage("Reconnect before refreshing again.")
+} catch (e: Exception) {
+    // Other checkpoint exceptions
+}
+```
+
+### Relationship to Local Writes
+
+When checkpoint requests are enabled, the SDK creates an internal request after each upload queue flush. You do not need to call `requestCheckpoint()` for your own writes. If you create a request while local writes are pending, waiting on it also waits for those writes to upload and their results to sync back:
+
+```kotlin
+database.execute(
+    "INSERT INTO tasks (id, description) VALUES (uuid(), ?)",
+    listOf("Review the project plan")
+)
+val checkpoint = database.requestCheckpoint()
+checkpoint.waitForSync()
+// The pending write has uploaded and its server state has synced locally.
+```
+
+This behavior relies on `uploadData()` returning only after your backend has committed the changes to the source database.
+
+### Async Upload Backends (Team/Enterprise)
+
+If `uploadData()` queues writes for later processing rather than committing them synchronously, implement `CustomCheckpointRequestConnector` on your connector. This requires a `checkpoint_requests` event definition in your sync config and is available on [Team and Enterprise](https://www.powersync.com/pricing) plans:
+
+```kotlin
+class MyBackendConnector: PowerSyncBackendConnector(), CustomCheckpointRequestConnector {
+    override suspend fun fetchCredentials(): PowerSyncCredentials? = TODO()
+    override suspend fun uploadData(database: PowerSyncDatabase) = TODO()
+
+    override suspend fun postCheckpointRequest(
+        clientId: String,
+        requestId: Long
+    ): Long {
+        val response = myBackend.createCheckpointRequest(clientId, requestId)
+        return response.checkpointRequestId
+    }
+}
+```
+
+See [Checkpoint Requests](https://docs.powersync.com/client-sdks/advanced/checkpoint-requests) for the full setup guide.
+
 ## Background Sync (Android)
 
 Share a single `PowerSyncDatabase` instance between the UI and any foreground service — do not create separate instances or use separate processes.
@@ -439,7 +527,7 @@ Full example: [`demos/supabase-todolist/androidBackgroundSync`](https://github.c
 
 ## ORM Integrations
 
-- **Room** (beta) — typed queries with compile-time validation: `com.powersync:powersync-room:$powersyncVersion` · [Docs](https://docs.powersync.com/client-sdks/orms/kotlin/room.md)
+- **Room** (beta) — typed queries with compile-time validation: `com.powersync:integration-room:$powersyncVersion` · [Docs](https://docs.powersync.com/client-sdks/orms/kotlin/room.md). If using v1.14.1 or later, upgrade Room to 3.0 before updating the integration.
 - **SQLDelight** (beta) — `PowerSyncDriver` implements `SqlDriver`: `com.powersync:powersync-sqldelight:$powersyncVersion` · [Docs](https://docs.powersync.com/client-sdks/orms/kotlin/sqldelight.md)
 
 ## Additional Resources
