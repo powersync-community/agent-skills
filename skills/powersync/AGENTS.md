@@ -1,6 +1,6 @@
 # PowerSync Skills
 
-Use this skill to onboard a project onto PowerSync without trial-and-error. Treat this as a guided workflow first and a reference library second.
+Use this skill to onboard a project onto PowerSync and to keep it healthy afterwards, without trial-and-error. Treat this as a guided workflow first and a reference library second.
 
 ## Terminology (read first)
 
@@ -15,7 +15,7 @@ If a sentence is ambiguous, default to the operator interpretation.
 
 | Do | Don't |
 |----|-----|
-| **Ask the operator** before doing anything: (1) **Cloud or self-hosted**, (2) **which database** (Supabase, Postgres, MongoDB, MySQL, MSSQL, or Convex), and (3) **only if not Supabase**, whether they have a backend API or need to build one. Use the **PowerSync CLI** by default for all operations. | Assume any answer, pick a default (e.g. Supabase, Postgres, self-hosted Docker), skip a question, or ask about a backend API when the operator already chose Supabase (Supabase *is* the backend). Do not hand-write config files or use the dashboard unless the operator explicitly says they cannot use the CLI. |
+| **Ask the operator** before doing anything: (1) **Cloud or self-hosted**, (2) **which database** (Supabase, Postgres, MongoDB, Azure DocumentDB, MySQL, MSSQL, or Convex), and (3) **only if not Supabase**, whether they have a backend API or need to build one. Use the **PowerSync CLI** by default for all operations. | Assume any answer, pick a default (e.g. Supabase, Postgres, self-hosted Docker), skip a question, or ask about a backend API when the operator already chose Supabase (Supabase *is* the backend). Do not hand-write config files or use the dashboard unless the operator explicitly says they cannot use the CLI. |
 | Use the **PowerSync CLI** to scaffold, link (if cloud hosted), and deploy (`references/powersync-cli.md`) | Hand-write `service.yaml` / `sync-config.yaml` from scratch or invent compose files **unless** the operator explicitly says they cannot use the CLI |
 | **Stop and ask** when a step needs credentials or interactive Cloud login you cannot perform | Silently build an alternate stack (e.g. manual Docker) without operator confirmation |
 | Complete **backend readiness** (deployed sync config, auth, publication) **before** app code | Start React/client integration while sync is still unconfigured |
@@ -60,6 +60,10 @@ Before acting on a saved entry naming a specific instance, file, or binary: veri
 
 No persistent memory in your harness? Ask the operator at session start and keep answers in the active conversation.
 
+### Verifying timing-dependent behavior
+
+Boot and auth-transition code paths (reads opened before auth resolves, provisional connect ordering) are timing-dependent, and local auth usually resolves too fast to exercise them. Throttle the auth provider's network requests (for example, Playwright route interception with a delay of about 2.5s) to reproduce production ordering deterministically. Temporary console marks around readiness flips and transition phases, captured with Playwright, give millisecond timelines that turn "feels slow" into attributable stages.
+
 
 ## Always Use the PowerSync CLI
 
@@ -72,8 +76,9 @@ No persistent memory in your harness? Ask the operator at session start and keep
 When the task is to add PowerSync to an app, follow this sequence:
 
 1. **Platform.** Cloud or self-hosted?
-2. **Backend.** If unspecified, ask (Supabase, custom Postgres, MongoDB, MySQL, MSSQL, or Convex). Do not assume Supabase. Then load:
+2. **Backend.** If unspecified, ask (Supabase, custom Postgres, MongoDB, Azure DocumentDB, MySQL, MSSQL, or Convex). Do not assume Supabase. Then load:
    - Supabase → `references/onboarding-supabase.md`
+   - Azure DocumentDB → use the MongoDB connector; PowerSync detects DocumentDB automatically. Follow the MongoDB path in `references/onboarding-custom.md`.
    - Convex → `references/powersync-service.md` § "Convex Quick Start"; writes go to Convex mutations from `uploadData()` — no custom REST API needed for the write path.
    - Anything else → `references/onboarding-custom.md` (must create a backend API with `uploadData`, token, and JWKS endpoints — do not skip this)
 3. **Supabase online or local?** If unclear from project/env, ask before choosing connection strings, auth config, or references.
@@ -85,6 +90,12 @@ When the task is to add PowerSync to an app, follow this sequence:
    - Self-hosted: `powersync init self-hosted` → `powersync docker configure` → `powersync docker start`
    - Source DB steps the agent cannot run (e.g. Supabase publication SQL): present the exact SQL, ask the operator to confirm done.
 8. Only after backend readiness is confirmed, implement app-side PowerSync integration.
+9. **Offer to leave a pointer in the project's agent context file.** After onboarding succeeds (Cloud Readiness Gate passed and the app integration works), future agent sessions should load this skill even when a prompt never mentions sync. Propose this to the operator and, on approval:
+   - If the project root has `AGENTS.md`, append the pointer line there. Otherwise, if it has `CLAUDE.md`, append it there. If neither exists, create `AGENTS.md` containing only the pointer line.
+   - Pointer line, verbatim: `This project uses PowerSync. Load the powersync skill before any data, schema, or sync work.`
+   - Skip this step (and say so) if the file already mentions PowerSync (search case-insensitively); never add a duplicate.
+   - Append the line at the end of the file as its own paragraph. Do not rewrite, reorder, or reformat existing content.
+   - If the project vendors this skill into tracked files instead of installing it, also recommend a re-vendor script that copies from the install location into the tracked copy, so `npx skills update` cannot silently drift the two apart. A vendored copy may be trimmed to the platforms the repo actually uses; remove the matching index lines mechanically so no references dangle.
 
 UI stuck on `Syncing...`? Default diagnosis is incomplete backend setup, not a frontend bug. Do not start client-side debugging while the service is unconfigured.
 
