@@ -233,6 +233,7 @@ storage:
 ```
 
 For the full self-hosted setup — bucket creation, permissions, and lifecycle rules — follow the [S3 setup guide](https://docs.powersync.com/sync/advanced/storage-version-4#self-hosted-s3-setup).
+When S3 object storage is enabled, you can raise `max_concurrent_connections` above the default of 200 per API process. With storage version 4 and S3 enabled, each API process supports up to 1,000 concurrent client connections. If a large share of those clients run an initial sync at the same time, performance degrades; scale out the API before any deployment that forces all clients to re-download their data.
 
 #### Storage Version Default
 
@@ -310,7 +311,7 @@ A single replication instance handles roughly 50,000–100,000 concurrent client
 Prometheus metrics are exposed on port `9464`. Enable the chart's `NetworkPolicy` (`networkPolicy.enabled: true`) in production to allow scrapes on that port. Key signals:
 
 | Metric | Note |
-|--------|------|
+|--------|-----------|
 | `powersync_concurrent_connections` | Primary HPA driver. Alert when a pod nears the 200 hard cap. |
 | `powersync_replication_lag_seconds` | Alert on sustained spikes. |
 | `powersync_replication_storage_size_bytes` | Capacity-plan from the trend. |
