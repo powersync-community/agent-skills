@@ -2,7 +2,7 @@
 name: powersync-service
 description: PowerSync Service configuration — self-hosting, Docker, Kubernetes, Helm, source database setup, bucket storage, authentication, and PowerSync Cloud
 metadata:
-  tags: service, self-hosted, docker, postgresql, mongodb, documentdb, cosmosdb, mysql, mssql, convex, authentication, jwt, replication, configuration, private-endpoints, privatelink, vpc, aws, kubernetes, helm, eks, prometheus_port, heartbeat_interval_seconds, snapshot_socket_timeout, healthcheck, migrations, disable_auto_migration, object_storage, s3, storage_version
+  tags: service, self-hosted, docker, postgresql, mongodb, documentdb, cosmosdb, mysql, mssql, convex, authentication, jwt, replication, configuration, private-endpoints, privatelink, vpc, aws, kubernetes, helm, eks, prometheus_port, heartbeat_interval_seconds, snapshot_socket_timeout, healthcheck, migrations, disable_auto_migration, object_storage, s3, storage_version, storage_version_4, incremental_reprocessing
 ---
 
 # PowerSync Service
@@ -216,9 +216,9 @@ replication:
       snapshot_socket_timeout: 120
 ```
 
-#### MongoDB Object Storage (Experimental)
+#### S3 Object Storage (Beta)
 
-To offload large bucket data chunks to S3-compatible object storage instead of MongoDB, configure `storage.object_storage` (available since Service v1.24.0; requires `storage_version: 3` in your sync config):
+To offload larger blocks of bucket data to Amazon S3 or an S3-compatible object store instead of MongoDB, configure `storage.object_storage` (requires Service v1.26.0 and `storage_version: 4` in the Sync Config). Sync Configs on version 2 keep all data in MongoDB even when this is configured. If `access_key_id` and `secret_access_key` are omitted, PowerSync uses credentials available to the process (such as an IAM role); for S3-compatible providers, also set `endpoint` and `force_path_style: true`.
 
 ```yaml
 storage:
@@ -232,16 +232,18 @@ storage:
     secret_access_key: !env PS_S3_SECRET
 ```
 
+For the full self-hosted setup — bucket creation, permissions, and lifecycle rules — follow the [S3 setup guide](https://docs.powersync.com/sync/advanced/storage-version-4#self-hosted-s3-setup).
+
 #### Storage Version Default
 
-To control which storage version the Service uses for new sync config deployments (available since Service v1.26.0), set `storage.default_storage_version`. Even numbers are stable; odd numbers are experimental:
+To control which storage version the Service uses for new Sync Config deployments (available since Service v1.26.0), set `storage.default_storage_version`. Even numbers are stable; odd numbers are experimental:
 
 ```yaml
 storage:
-  default_storage_version: 2  # 2 (stable, default); 3 (experimental)
+  default_storage_version: 2  # 2 (stable, default in v1.26.0); 4 (Beta — enables incremental reprocessing and S3)
 ```
 
-Set this before a Service downgrade, or to delay a storage format upgrade. See [Storage Version](https://docs.powersync.com/sync/advanced/compatibility#storage-version) for details.
+Set this to opt in to [storage version 4](https://docs.powersync.com/sync/advanced/storage-version-4), prepare for a Service downgrade, or delay a storage format upgrade.
 
 #### Deprecated: `sync_rules` Key
 
@@ -484,7 +486,7 @@ If the operator is on the RU-based model, direct them to the [Microsoft migratio
 - **Post-images are not supported.** Use `post_images: off` (the default). Updates and deletes still replicate correctly because DocumentDB always includes the full document on change events. Only the `auto_configure` and `read_only` consistency modes are unavailable.
 - **Collection drop and rename are not replicated.** If a replicated collection is dropped or renamed, already-synced rows remain under the old name. Recovery requires redeploying Sync Streams to trigger a resync.
 - **Documents at or above 15 MiB are dropped** with a logged error. This limit is more reachable on DocumentDB because every change event carries the full document. Large documents also replicate more slowly.
-- **Large initial snapshots require storage v3 or later.** On storage v1 or v2, a large or active source can exhaust its change-feed history window before the snapshot completes, causing replication to loop. Storage v3 avoids this by streaming during the snapshot.
+- **Large initial snapshots may not complete on legacy storage.** On storage versions 1 and 2, PowerSync waits for the initial scan to finish before reading source changes. On a large or busy source, the earliest required changes can expire before the scan finishes, forcing PowerSync to start over. Use [storage version 4](https://docs.powersync.com/sync/advanced/storage-version-4), which reads new source changes while the initial snapshot runs.
 - **Do not drop `_powersync_checkpoints`** or delete its documents. Doing so disrupts replication.
 
 ### MySQL Quick Start
