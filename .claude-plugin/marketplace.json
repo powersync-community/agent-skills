@@ -69,6 +69,14 @@
             {
               "file": "[/\\\\]Package\\.swift$",
               "pattern": "powersync"
+            },
+            {
+              "file": "\\.csproj$",
+              "pattern": "PowerSync"
+            },
+            {
+              "file": "[/\\\\]Podfile$",
+              "pattern": "powersync"
             }
           ]
         }
