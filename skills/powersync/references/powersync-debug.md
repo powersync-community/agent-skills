@@ -2,7 +2,7 @@
 name: powersync-debug
 description: PowerSync debugging and troubleshooting — sync status, JWT verification, PSYNC error codes, replication lag, and diagnostics tools
 metadata:
-  tags: debugging, troubleshooting, sync-status, jwt, psync-errors, replication-lag, ps-crud, diagnostics
+  tags: debugging, troubleshooting, sync-status, jwt, psync-errors, replication-lag, ps-crud, diagnostics, log-reference, close-reason, checkpoint, flushed, sync-stream-started, sync-stream-complete
 ---
 
 # PowerSync Debug
@@ -54,6 +54,44 @@ Each of the PowerSync Client SDKs have the SyncStatus class that can be used to 
 | .NET (Alpha)    | [SyncStatus.cs](https://github.com/powersync-ja/powersync-dotnet/blob/main/PowerSync/PowerSync.Common/DB/Crud/SyncStatus.cs)                                   |
 
 Key fields to check: `connected`, `downloading`, `uploading`, `lastSyncedAt`, `hasSynced`, `downloadError`, `uploadError`.
+
+## Read Sync Errors That Print as `[object Object]` (Web)
+
+What it identifies: The actual name, message, and cause of a sync error that a web app logs as `[object Object]`.
+
+Why: On the Web SDK, errors raised inside the shared sync worker cross the MessagePort serialized by `SyncStatus.toJSON()` and arrive as plain `{name, message, stack, cause}` objects. They are not `Error` instances: `String(error)` prints `[object Object]` and `instanceof Error` is false, so generic error formatting hides the real failure.
+
+How: Read the `name` and `message` fields directly, and flatten the `cause` chain (each `cause` can itself be a serialized error). Always record which side reported the failure: `status.uploadError` or `status.downloadError`.
+
+What to look for: The two sides call for different first responses. `uploadError` points at the upload queue and your backend (see [Inspect `ps_crud` Directly](#inspect-ps_crud-directly)); `downloadError` points at credentials, the service, or the download path.
+
+## A Resolved `connect()` Is Not a Working Connection
+
+What it identifies: Why an app stays stuck on `Syncing...` even though `connect()` returned without throwing.
+
+Why: `connect()` is fire-and-forget. It resolves even when `fetchCredentials()` fails, and the retry loop that follows surfaces only through `SyncStatus`: `downloadError` is set and `connected` stays `false` between retries.
+
+How: Treat `SyncStatus` as the source of truth for connection health, not the `connect()` promise. Do not put `await connect()` on a UI-blocking path expecting it to fail loudly; it won't.
+
+What to look for: `connected: false` with a populated `downloadError` after `connect()` resolved means the credential or connection loop is failing silently. Start with `fetchCredentials()` and the endpoint URL.
+
+## Persisted Sync State Is Available at Open, Offline
+
+What it identifies: Whether first-sync UI showing on every reload is an app wiring bug rather than an SDK problem.
+
+Why: `hasSynced`, `lastSyncedAt`, and per-stream subscription state are read from the local database when it opens (via `powersync_offline_sync_status()`), before any network activity. A device that has synced before reports ready milliseconds after open, even offline.
+
+How: If an app shows first-sync UI on every reload, inspect what the UI gates on. The SDK's persisted state is correct; the app is likely gating on a value that resets per session (a fresh in-memory flag, or live connection state) instead of `hasSynced`.
+
+## Never Gate Local-Only Reads on Stream Readiness
+
+What it identifies: Guest or signed-out surfaces pinned to a loading state forever.
+
+Why: The "wait for first sync before trusting local queries" rule applies only to identities that can download. A guest or local-only database never connects, so its streams never report synced. Gating guest reads on `hasSynced` (or a `waitForStream` option) pins every guest surface to a permanent loading state.
+
+How: Gate on whether the current identity is expected to sync, for example `mustWaitForStream = authLoaded && isSignedIn`, and apply that gate to every collection read hook.
+
+What to look for: Partial application. A fix applied to one read hook but not the others produces surfaces that load and surfaces that spin in the same app. Audit every read hook that gates on sync readiness, not only the one that was reported.
 
 ## Enable the Request Logger (Swift SDK)
 
@@ -107,6 +145,16 @@ SELECT * FROM ps_crud ORDER BY id
 
 What to look for: `op` (PUT/PATCH/DELETE), `type` (table name), `id`, `opData` (changed columns). If a column you updated is missing from `opData`, it means its value didn't change from the previous row (PowerSync intentionally omits unchanged values).
 
+## A Wedged Upload Looks Like Syncing Forever
+
+What it identifies: A first sync that never completes because a failing upload is blocking downloads, presenting as an eternal spinner rather than an upload error.
+
+Why: Uploads are processed before downloads. One upload that keeps failing blocks checkpoint application, so the first sync never completes. The UI symptom is an indefinite `Syncing...` state; nothing on screen mentions uploads.
+
+How: Inspect `ps_crud` (see the preceding section) for stuck entries, then check `status.uploadError` for the failure.
+
+What to look for: A non-empty `ps_crud` whose oldest entry never drains, together with a latched `uploadError`. In the app's own UX, after a grace window, distinguish "downloading" (connected, download progress advancing) from "stalled" (disconnected, or a latched `uploadError`/`downloadError`) instead of showing an indefinite optimistic spinner; the optimistic spinner hides exactly this failure.
+
 ## Log the Actual `endpoint` URL in `fetchCredentials()`
 
 What it identifies: Whether the `endpoint` value returned by your connector is pointing at the PowerSync Service, not your app backend.
@@ -127,6 +175,20 @@ EXPLAIN QUERY PLAN SELECT ...
 ```
 
 What to look for: `SCAN TABLE <name>` (bad / no index used) vs. `SEARCH TABLE <name> USING INDEX` (good). If your PowerSync tables show a SCAN, switch to [raw tables](https://docs.powersync.com/usage/use-case-examples/raw-tables.md). If your non-PowerSync tables show a SCAN, add an index on the join column.
+
+## Benchmark Client Queries Without a Device
+
+What it identifies: Missing or unusable schema indexes and expensive query shapes, before they ship, using any local SQLite instead of a real device.
+
+Why: The client storage layout is reproducible. Each PowerSync table is stored as `ps_data__<table>(id, data)` with a view exposing `CAST(json_extract(data, '$.col') AS <type>)` columns, and schema indexes compile to those same expressions. A benchmark database built with this layout exercises the same query plans as a real client.
+
+How: Seed 10k-50k rows into an in-memory SQLite database using that layout, run the app's real query builders against it, and read `EXPLAIN QUERY PLAN` for each query.
+
+What to look for:
+
+- `SCAN` plus `USE TEMP B-TREE FOR ORDER BY` is the red flag; a matching composite index turns it into `SEARCH ... USING INDEX`.
+- A filter wrapped in an expression (`CASE`, or `coalesce()` around the indexed column) can never use a schema index. Rewrite predicates as bare-column equalities so they are sargable, and let the planner choose the index.
+- The planner's index-versus-scan choice depends on data distribution (after `ANALYZE`). Seed the benchmark with realistic skew, or the conclusion is wrong.
 
 ## Check Package Versions and Duplicate Dependencies
 
@@ -172,8 +234,8 @@ What it identifies: Whether stale data from a previous user is polluting the loc
 Why: `disconnect()` closes the sync connection but keeps all local data. If you call `disconnect()` on logout and then `connect()` with a new user, the new user's UI will initially display the old user's data until sync completes. `disconnectAndClear()` wipes the local database first, so the new user starts from a clean state.
 
 When to use each:
-- `disconnect()` — temporary offline, token refresh, app backgrounding. Safe to reconnect as the same user.
-- `disconnectAndClear()` — user logout, user account switch. Required to prevent data leakage between users.
+- `disconnect()` — temporary offline, token refresh, app backgrounding, or a same-user sign-out where retaining local data is safe. The client resumes from its saved sync position on the next `.connect()`.
+- `disconnectAndClear()` — user account switch, or any sign-out where another user can access the device or security requires wiping local data. Never retain one user's local data for a different user.
 
 ## PSYNC Error Codes
 
@@ -190,6 +252,7 @@ Key codes to recognize at runtime:
 | `PSYNC_S1005` | Storage version not supported | Caused by a service downgrade; upgrade the PowerSync Service to match the stored version |
 | `PSYNC_S1146` | Replication slot invalidated (`wal_status = 'lost'`) | Use the recovery steps in [Replication Lag Debugging (Postgres)](#replication-lag-debugging-postgres) |
 | `PSYNC_S1601` | MSSQL: CDC capture instance dropped during polling | Re-enable CDC for the affected table; replication resumes automatically once CDC is active |
+| `PSYNC_S2305` | Too many buckets or too many parameter query results | Read the error message: `Too many buckets` means reduce unique bucket count; `Too many parameter query results` means reduce parameter lookup rows. See [Reducing Bucket Count](https://docs.powersync.com/sync/advanced/reducing-bucket-count). |
 
 See [Error Codes Reference](https://docs.powersync.com/debugging/error-codes.md#error-codes-reference) for more information.
 
@@ -206,6 +269,8 @@ Put a timestamp in the data. When a row is written or updated in the source data
 ### Stage 1: Source Database to PowerSync Service
 
 Check the **Replication Lag** chart in the **Metrics** view of the [PowerSync Dashboard](https://dashboard.powersync.com/). Replicator logs in the **Logs** view surface errors that cause delays at this stage.
+
+On PowerSync Cloud, the **Logs** view also provides two additional log types. **Compact logs** record the daily automatic compacting job and any manually triggered runs. **Migration logs** record the migration job that prepares instance storage during a deploy. If a deploy fails at the migration step, check Migration logs first. If a compacting job is failing or taking longer than expected, check Compact logs.
 
 When the user shares instance logs from the **Logs** view, look for `Flushed` entries. Each entry records one batch written to bucket storage and is the most direct view of replication throughput:
 
@@ -224,6 +289,8 @@ Structured log properties are available under `flushed` on each entry:
 | `duration` | Write time in milliseconds. |
 | `replication_lag_seconds` | Age of the oldest uncommitted change in this batch, in seconds. Only present when the Service can determine this value. |
 
+Flush counts can differ across fields. For example, `0 ops, 0 index entries, 2000 records` means the Service wrote source records without bucket operations or parameter index entries. A flush alone does not confirm a committed checkpoint or delivery to a client.
+
 For source-specific guidance (Postgres, MongoDB, MySQL, SQL Server) see [Replication Lag](https://docs.powersync.com/maintenance-ops/replication-lag) and [Replication Lag Debugging (Postgres)](#replication-lag-debugging-postgres) below.
 
 ### Stage 2: PowerSync Service to Client
@@ -237,12 +304,24 @@ Both events share the same `rid`; to match a started/complete pair for a single 
 
 [Custom metadata](https://docs.powersync.com/maintenance-ops/monitoring-and-alerting#custom-metadata-in-sync-logs) set at `connect()` time appears in both events, enabling filtering by app version, environment, or other context.
 
+The `close_reason` field on stream complete records why the session ended:
+
+| Value | Meaning |
+|-------|--------|
+| `client closing stream` | Client side closed the connection. Check client-side logs for why. |
+| `service closing stream` | Service ended the stream (token expired or Sync Config switch). |
+| `stream error` | Error interrupted the stream. Read the error logged for the same `rid`. |
+| `process shutdown` | Process shutting down, for example during a deploy. |
+| `unknown` | Service did not identify a close reason. Check nearby messages for the same `rid`. |
+
+For a full reference of all Service log messages and their structured fields, see [Log Reference](https://docs.powersync.com/debugging/log-reference).
+
 ### Common Causes
 
 - **Large initial sync** — sync rules with a large dataset will slow the first sync after connecting. Inspect bucket sizes with the [Sync Diagnostics Client](https://diagnostics-app.powersync.com/).
 - **Upload queue blocking downloads** — by default, uploads are processed before downloads. Buckets and streams at [priority 0](https://docs.powersync.com/sync/advanced/prioritized-sync) are not blocked by uploads but carry trade-offs around sync consistency.
 - **Replication lag on the source database** — high write volume, long-running transactions, bulk updates, or backfills can cause replication to fall behind. See Stage 1 above.
-- **Too many buckets per user** — incremental sync overhead scales roughly linearly with bucket count per user.
+- **Too many buckets or parameter results per user**: two per-user limits apply, both defaulting to 1,000. Exceeding either fails sync with `PSYNC_S2305`. High bucket counts also increase incremental sync overhead roughly linearly. See [Reducing Bucket Count](https://docs.powersync.com/sync/advanced/reducing-bucket-count).
 
 # Replication Lag Debugging (Postgres)
 
