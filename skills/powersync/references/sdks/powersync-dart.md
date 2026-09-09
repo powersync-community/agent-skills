@@ -2,7 +2,7 @@
 name: powersync-dart
 description: PowerSync Dart SDK — schema, queries, sync lifecycle, backend connectors, Drift ORM, Flutter Web support, and encryption
 metadata:
-  tags: dart, flutter, flutter-web, drift, orm, sqlite, encryption, sqlcipher, sqlite3mc, checkpoint-requests
+  tags: dart, flutter, flutter-web, drift, orm, sqlite, encryption, sqlcipher, sqlite3mc, checkpoint-requests, sync-streams, syncStream
 ---
 
 # PowerSync Dart SDK
@@ -143,7 +143,26 @@ If statement preparation overhead is visible in profiling, set `preparedStatemen
 
 ## Sync Streams
 
-See [sync-config.md](references/sync-config.md) for how to subscribe to Sync Streams when `auto_subscribe` is not set to `true` in the PowerSync Service config.
+Sync Streams define what data syncs to each client. See [sync-config.md](references/sync-config.md) for server-side configuration (YAML definitions, parameters, CTEs).
+
+If `auto_subscribe` is not set to `true` in the sync config, subscribe to streams from client code:
+
+```dart
+// Subscribe to a stream with parameters
+final sub = await db.syncStream('list_todos', {'list_id': listId}).subscribe();
+
+// Wait for this specific stream to complete its first sync
+await sub.waitForFirstSync();
+
+// The stream's rows are now in the local SQLite database.
+// Read the data with a local query:
+final rows = await db.getAll('SELECT * FROM todos WHERE list_id = ?', [listId]);
+
+// When the stream is no longer needed
+sub.unsubscribe();
+```
+
+Same stream name with different parameters creates separate subscriptions. Subscribing while offline is supported. For full details see [Client-Side Usage](https://docs.powersync.com/sync/streams/client-usage.md).
 
 ## Checkpoint Requests (Alpha)
 
@@ -303,7 +322,7 @@ See [Flutter Web Support](https://docs.powersync.com/client-sdks/frameworks/flut
 Two options are available for encrypting the local SQLite database at rest:
 
 | Option | Platforms |
-|--------|----------|
+|--------|-----------|
 | [SQLite3MultipleCiphers](https://utelle.github.io/SQLite3MultipleCiphers) | Native + web |
 | [SQLCipher Community Edition](https://www.zetetic.net/sqlcipher/) | Native only |
 
