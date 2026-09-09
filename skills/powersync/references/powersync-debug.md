@@ -2,7 +2,7 @@
 name: powersync-debug
 description: PowerSync debugging and troubleshooting — sync status, JWT verification, PSYNC error codes, replication lag, and diagnostics tools
 metadata:
-  tags: debugging, troubleshooting, sync-status, jwt, psync-errors, replication-lag, ps-crud, diagnostics
+  tags: debugging, troubleshooting, sync-status, jwt, psync-errors, replication-lag, ps-crud, diagnostics, log-reference, close-reason, checkpoint, flushed, sync-stream-started, sync-stream-complete
 ---
 
 # PowerSync Debug
@@ -287,6 +287,8 @@ Structured log properties are available under `flushed` on each entry:
 | `duration` | Write time in milliseconds. |
 | `replication_lag_seconds` | Age of the oldest uncommitted change in this batch, in seconds. Only present when the Service can determine this value. |
 
+Flush counts can differ across fields. For example, `0 ops, 0 index entries, 2000 records` means the Service wrote source records without bucket operations or parameter index entries. A flush alone does not confirm a committed checkpoint or delivery to a client.
+
 For source-specific guidance (Postgres, MongoDB, MySQL, SQL Server) see [Replication Lag](https://docs.powersync.com/maintenance-ops/replication-lag) and [Replication Lag Debugging (Postgres)](#replication-lag-debugging-postgres) below.
 
 ### Stage 2: PowerSync Service to Client
@@ -299,6 +301,18 @@ Sync & API logs record two events per sync session:
 Both events share the same `rid`; to match a started/complete pair for a single session, search `rid:<request-id>` in the dashboard **Logs** view. To find a specific user's sessions, search `user_id:<user-id>`. If a known error is producing noise, prefix the filter with `-` to exclude matching entries. For example, `-error:PSYNC_S2106` hides all entries with that error code.
 
 [Custom metadata](https://docs.powersync.com/maintenance-ops/monitoring-and-alerting#custom-metadata-in-sync-logs) set at `connect()` time appears in both events, enabling filtering by app version, environment, or other context.
+
+The `close_reason` field on stream complete records why the session ended:
+
+| Value | Meaning |
+|-------|--------|
+| `client closing stream` | Client side closed the connection. Check client-side logs for why. |
+| `service closing stream` | Service ended the stream (token expired or Sync Config switch). |
+| `stream error` | Error interrupted the stream. Read the error logged for the same `rid`. |
+| `process shutdown` | Process shutting down, for example during a deploy. |
+| `unknown` | Service did not identify a close reason. Check nearby messages for the same `rid`. |
+
+For a full reference of all Service log messages and their structured fields, see [Log Reference](https://docs.powersync.com/debugging/log-reference).
 
 ### Common Causes
 
