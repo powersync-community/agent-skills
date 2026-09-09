@@ -2,7 +2,7 @@
 name: sync-config
 description: PowerSync Sync Config — Sync Streams (new), Sync Rules (legacy), parameters, CTEs, common patterns, and migration guidance
 metadata:
-  tags: sync-streams, sync-rules, sync-config, yaml, buckets, parameters, cte, migration, convex
+  tags: sync-streams, sync-rules, sync-config, yaml, buckets, parameters, cte, migration, convex, wildcard-schema, table-metadata, schema-per-tenant, prioritized-sync
 ---
 
 # Sync Config
@@ -97,7 +97,7 @@ streams:
       - SELECT * FROM <table_b> WHERE ...
 ```
 
-> **Bucket limit**: Each unique `(stream name + parameter values)` combination creates one internal bucket. The default limit is **1,000 buckets per user**. If a stream with subscription parameters could create many combinations, use `queries:` (multiple queries inside one stream) instead of separate streams — this keeps everything in one bucket.
+> **Bucket limits**: Each unique `(stream name + parameter values)` combination creates one internal bucket. Two per-user limits apply, both defaulting to 1,000: unique bucket count and parameter lookup rows (counted before deduplication, across all streams). If a user exceeds either limit, their sync fails with `PSYNC_S2305`. Read the error message to determine which limit was reached, since the fix differs. To keep bucket count low, use `queries:` (multiple queries in one stream) instead of separate streams. See [Bucket Count](https://docs.powersync.com/sync/streams/bucket-count) for how both limits are calculated.
 
 ## Stream Options
 
@@ -155,6 +155,28 @@ streams:
 The client can also override the priority per-subscription — see [Client Usage](#client-usage).
 
 See [Prioritized Sync](https://docs.powersync.com/sync/advanced/prioritized-sync.md) for full details.
+
+#### First-paint priority split
+
+For an app whose main surface reads a small slice of a large auto-subscribed dataset, split the streams: put the first-screen rows in a small `priority: 1` auto-subscribed stream and keep the bulk at `priority: 2` or lower priority. The first screen can then open at the priority 1 checkpoint instead of waiting for the full first sync.
+
+```yaml
+streams:
+  inbox_items:
+    priority: 1
+    auto_subscribe: true
+    query: SELECT * FROM items WHERE user_id = auth.user_id() AND folder = 'inbox'
+
+  all_items:
+    priority: 2
+    auto_subscribe: true
+    query: SELECT * FROM items WHERE user_id = auth.user_id()
+```
+
+Two nuances:
+
+- Overlap is the point. The same rows appearing in both the hot stream and the bulk stream is safe; a row is only removed from the client when no subscribed stream retains it. Filtering the hot stream on a user-editable column (such as `folder`) is normally risky because an edit can drop the row out of the stream mid-session, but with the bulk stream also subscribed, the row stays local after it leaves the hot slice.
+- The client must gate honestly. Only reads fully covered by the hot slice may open at the priority 1 checkpoint. Whole-account aggregates (counts, "all items" lists) must still wait for the full sync, or partial data is presented as complete. The consistency caveats of [Prioritized Sync](https://docs.powersync.com/sync/advanced/prioritized-sync.md), such as stale rows pending deletion, apply as usual.
 
 ### `accept_potentially_dangerous_queries` (default: `false`)
 
@@ -244,6 +266,33 @@ streams:
         SELECT org_id FROM org_members WHERE user_id = auth.user_id()
       )
 ```
+
+### Schema-per-Tenant Data (Postgres)
+
+For multi-tenant Postgres databases with one identical schema per tenant, use a wildcard schema name and the `schema()` function. Prefix `schema()` with the table name or alias from the `FROM` clause. Filter by a JWT claim to restrict each client to its own schema:
+
+```yaml
+config:
+  edition: 3
+
+streams:
+  work_orders:
+    query: SELECT * FROM "%".work_orders WHERE work_orders.schema() = auth.parameter('tenant_schema')
+```
+
+`"%"` matches every schema; `"tenant_%"` matches every schema whose name starts with `tenant_`. Postgres system schemas are never matched. Rows from all matched schemas sync into a single client-side table named after the table in the query. Requires Sync Streams and PowerSync Service v1.24.0 or later.
+
+**Table metadata functions**: In Sync Streams, these functions return metadata about the source row. Prefix each call with the table name or alias from the `FROM` clause. For example, with `FROM "todos_%" AS todos`, write `todos.table_suffix()`. The functions are available in `WHERE` clauses, `SELECT` columns, and subqueries. Requires Service v1.24.0+.
+
+| Function | Returns |
+|----------|---------|
+| `schema()` | Source schema name; use with wildcard schemas |
+| `table_name()` | Source table name |
+| `table_suffix()` | Suffix matched by a wildcard table name; empty on tables without a wildcard name |
+
+If filtering on the wildcard suffix in Sync Streams, use `table_alias.table_suffix()`, not `_table_suffix`. The `_table_suffix` column is available in Sync Rules only.
+
+See [Wildcard Schemas](https://docs.powersync.com/sync/advanced/schemas-and-connections.md#wildcard-schemas-postgres) for setup requirements.
 
 ### On-demand with subscription parameter
 
@@ -436,11 +485,54 @@ Reference these when the standard patterns don't cover your use case:
 |-------|-------------|
 | [Client ID](https://docs.powersync.com/sync/advanced/client-id.md) | Filter or scope data by which specific client device is syncing |
 | [Sync Data by Time](https://docs.powersync.com/sync/advanced/sync-data-by-time.md) | Limit sync to a rolling time window (e.g. last 30 days) |
-| [Schemas and Connections](https://docs.powersync.com/sync/advanced/schemas-and-connections.md) | Source data from multiple database schemas or connections |
+| [Schemas and Connections](https://docs.powersync.com/sync/advanced/schemas-and-connections.md) | Use non-public Postgres schemas; wildcard schemas (`"tenant_%"`) for schema-per-tenant databases (Service v1.24.0+); HA/replica connections |
 | [Multiple Client Versions](https://docs.powersync.com/sync/advanced/multiple-client-versions.md) | Support different schema versions across app releases |
-| [Partitioned Tables](https://docs.powersync.com/sync/advanced/partitioned-tables.md) | Sync from Postgres partitioned tables |
+| [Partitioned Tables](https://docs.powersync.com/sync/advanced/partitioned-tables.md) | Sync from Postgres partitioned tables; in Sync Streams, use `table_alias.table_suffix()` to filter on the matched suffix (not `_table_suffix`, which is Sync Rules only) |
 | [Sharded Databases](https://docs.powersync.com/sync/advanced/sharded-databases.md) | Source data from multiple database shards |
 | [Compatibility Flags](https://docs.powersync.com/sync/advanced/compatibility) | Fix known SQL expression edge cases in Sync Streams; if `NOT NULL`, `substr()`, or `length()` behave unexpectedly, `unstable_sqlite_expression_engine` (Service ≥ 1.22.0, experimental — may be removed) routes evaluation through actual SQLite |
+
+### Multiple Client Versions
+
+When a schema change breaks older app versions still in use (for example, renaming or restructuring a table), define separate stream versions so each client receives the schema it expects.
+
+If the affected stream is manually subscribed (no `auto_subscribe: true`), prefer versioning by stream name. Define a new stream alongside the old one. New app versions subscribe to the new stream by name; older versions continue subscribing to the old stream. Remove the old stream once those versions are no longer in use.
+
+```yaml
+streams:
+  # Old stream, kept for backward compatibility.
+  # Remove once older app versions are no longer in use.
+  user_assets:
+    query: SELECT * FROM assets WHERE user_id = auth.user_id()
+
+  # New app versions subscribe to this stream.
+  # The alias maps the source table to the new client-side name.
+  user_assets_v2:
+    query: SELECT * FROM assets AS assets_v2 WHERE user_id = auth.user_id()
+```
+
+```js
+// New app versions subscribe to the new stream
+const subscription = await db.syncStream('user_assets_v2').subscribe();
+```
+
+If the stream uses `auto_subscribe: true`, clients cannot choose a stream by name. Use connection parameters instead: each client passes its version on connect, and stream queries filter on it.
+
+```yaml
+streams:
+  user_assets:
+    auto_subscribe: true
+    query: SELECT * FROM assets
+           WHERE user_id = auth.user_id()
+             AND connection.parameter('schema_version') = '1'
+
+  user_assets_v2:
+    auto_subscribe: true
+    query: SELECT * FROM assets AS assets_v2
+           WHERE user_id = auth.user_id()
+             AND connection.parameter('schema_version') = '2'
+```
+
+See [Multiple Client Versions](https://docs.powersync.com/sync/advanced/multiple-client-versions.md) for full details including the legacy Sync Rules approach.
 
 ## Convex-Specific Patterns
 
@@ -647,3 +739,9 @@ bucket_definitions:
     data:
       - SELECT * FROM records WHERE tenant_id = bucket.tenant_id
 ```
+
+### Multiple Client Versions
+
+When a schema change affects a manually subscribed stream, define a new versioned stream alongside the old one. New app versions subscribe to the new stream by name; old versions continue with the old stream until they update.
+
+If the stream uses `auto_subscribe: true`, clients cannot choose by name. Use connection parameters filtered per stream instead, so each app version receives the variant matching its declared version.

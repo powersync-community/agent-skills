@@ -96,6 +96,28 @@ Tags are used by skill routing systems for auto-activation. Use terms developers
 
 If you add an example that touches these patterns, make sure it reflects these rules.
 
+## Releases and versioning
+
+The skill has a single version declared in four places that must always match:
+
+1. `package.json` `version`
+2. `skills/powersync/SKILL.md` frontmatter `metadata.version`
+3. `.claude-plugin/marketplace.json` plugin entry `version`
+4. `.claude-plugin/marketplace.json` marketplace `metadata.version`
+
+`pnpm validate` fails when they differ, and CI enforces it.
+
+Why this matters: Claude Code re-downloads an installed plugin only when the marketplace plugin `version` string changes. Content merged without a version bump never reaches existing plugin installs.
+
+Release Please owns these version fields. Do not edit them by hand or remove the `x-release-please-version` marker from `SKILL.md`. Instead, use a [Conventional Commit](https://www.conventionalcommits.org/) prefix in the PR title (and therefore the squash commit on `main`) to declare the release impact:
+
+- `fix:` creates a patch release for corrections and small content updates.
+- `feat:` creates a minor release for new reference files, SDK coverage, or trigger changes.
+- A commit with `BREAKING CHANGE:` in its footer creates a major release for incompatible restructures.
+- `docs:`, `chore:`, and other non-release prefixes do not create a release on their own.
+
+After releasable changes land on `main`, Release Please opens or updates a release PR. Merging that PR creates the version tag and GitHub Release, then uploads `index.json` and the skill archive. The repository's `GITHUB_TOKEN` is sufficient for publishing; maintainers can configure a `RELEASE_PLEASE_TOKEN` fine-grained personal access token if release-PR activity must trigger other GitHub Actions workflows.
+
 ## Submitting a Pull Request
 
 1. Fork the repo and create a branch from `main`.
@@ -104,7 +126,7 @@ If you add an example that touches these patterns, make sure it reflects these r
    ```
    npx skills add <path/to/powersync-ja/agent-skills>
    ```
-4. Open a PR against `main` with a clear description of what changed and why.
+4. Open a PR against `main` with a clear description of what changed and why. Use a Conventional Commit PR title such as `fix: correct Dart upload guidance` or `feat: add Expo SQLite coverage`.
 
 ### PR description checklist
 
@@ -112,6 +134,7 @@ If you add an example that touches these patterns, make sure it reflects these r
 - What was wrong or missing?
 - Was any content removed, and if so, why?
 - If a new reference file was added, which entry point files were updated to route to it?
+- Does the PR title accurately encode the release impact? Do not bump version files manually.
 
 ## Questions
 
