@@ -163,6 +163,7 @@ Do not proceed to app-side code until **all** items below are verified:
 - Client auth is configured
 - Instance URL is available for `fetchCredentials()`
 - Source database replication/publication setup is complete
+- The replication connection uses a dedicated user (e.g. `powersync_role` on Supabase/Postgres), not a superuser or admin account
 - All credentials and URLs are in `.env` (e.g. `POWERSYNC_URL`, `PS_DATABASE_URI`, plus any backend-specific keys)
 
 Missing item? Finish service setup first. Use the CLI to verify and complete. For steps the agent cannot perform (e.g. running SQL in the source DB), present the exact commands and ask the operator to confirm completion before writing app code.
